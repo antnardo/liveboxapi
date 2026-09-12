@@ -2,7 +2,12 @@
 
 import pytest
 
-from liveboxapi.errors import AuthenticationError, LiveboxError, ReadOnlyError
+from liveboxapi.errors import (
+    AuthenticationError,
+    LiveboxError,
+    MalformedResponseError,
+    ReadOnlyError,
+)
 from liveboxapi.session import LiveboxSession
 
 
@@ -195,3 +200,78 @@ class TestLifecycle:
 
     def test_repr_hides_everything_sensitive(self, session):
         assert "secret" not in repr(session)
+
+
+class TestErrorEnvelopes:
+    """The box words the same refusal two ways, depending on the service."""
+
+    def test_error_as_a_list_raises(self, session, http):
+        http.enqueue({"status": None, "errors": [{"error": 13, "description": "Permission denied"}]})
+        with pytest.raises(LiveboxError) as raised:
+            session.call("Firewall", "getPortForwarding")
+        assert raised.value.code == 13
+
+    def test_error_as_a_top_level_code_raises(self, session, http):
+        http.enqueue({"status": None, "error": 13, "description": "Permission denied", "info": "x"})
+        with pytest.raises(LiveboxError) as raised:
+            session.call("Firewall", "getPortForwarding")
+        assert raised.value.code == 13
+
+    def test_the_top_level_description_is_carried(self, session, http):
+        http.enqueue({"error": 196618, "description": "Object not found", "info": "Nope"})
+        with pytest.raises(LiveboxError) as raised:
+            session.call("Nope", "get")
+        assert raised.value.info == "Nope"
+
+
+class TestMalformedAnswers:
+    def test_a_permission_denied_body_raises_the_refusal_not_a_parse_error(self, session, http):
+        # Ten NeMo.Intf objects on a Livebox W7 answer HTTP 200 with this.
+        http.enqueue_body(',"errors":[{"error":13,"description":"Permission denied","info":""}]')
+        with pytest.raises(LiveboxError) as raised:
+            session.introspect("NeMo.Intf.wireguard_t")
+        assert raised.value.code == 13
+
+    def test_an_html_error_page_raises_a_malformed_response(self, session, http):
+        http.enqueue_body("<html>400</html>")
+        with pytest.raises(MalformedResponseError):
+            session.introspect(".")
+
+
+class TestListPayloads:
+    """Services with several root objects answer with an array."""
+
+    def test_introspect_returns_the_list(self, session, http):
+        http.enqueue([{"objectInfo": {"key": "a"}}, {"objectInfo": {"key": "b"}}])
+        assert len(session.introspect("NeMo")) == 2
+
+    def test_functions_are_collected_across_the_roots(self, session, http):
+        http.enqueue(
+            [
+                {"functions": [{"name": "getMIBs", "type": "dict", "arguments": []}]},
+                {"functions": [{"name": "setMIBs", "type": "bool", "arguments": []}]},
+            ]
+        )
+        assert [f.name for f in session.functions("NeMo")] == ["getMIBs", "setMIBs"]
+
+    def test_parameters_are_collected_across_the_roots(self, session, http):
+        http.enqueue(
+            [
+                {"parameters": [{"name": "Status", "value": "up"}]},
+                {"parameters": [{"name": "Flags", "value": "enabled"}]},
+            ]
+        )
+        assert session.parameters("NeMo") == {"Status": "up", "Flags": "enabled"}
+
+
+class TestCertificateVerification:
+    def test_verification_is_on_by_default(self, session, http):
+        http.enqueue({"status": True})
+        session.call("Firewall", "commit")
+        assert http.posts[-1]["verify"] is True
+
+    def test_it_can_be_turned_off_for_the_box_own_certificate(self, http, credentials):
+        http.enqueue({"data": {"contextID": "ctx-1"}})
+        live = LiveboxSession(credentials, session=http, verify=False)
+        live.login()
+        assert http.posts[-1]["verify"] is False

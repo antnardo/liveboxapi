@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 __all__ = [
+    "BoxIdentity",
     "Device",
     "DmzEntry",
     "FunctionSignature",
@@ -46,6 +47,41 @@ def _parse_time(value: str) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class BoxIdentity:
+    """Who answered, read without signing in.
+
+    ``DeviceInfo.get`` is the one service the box serves to an anonymous caller.
+    That makes it the cheap way to answer three questions before any credential
+    is involved: is there a Livebox at this address, which model, and which
+    firmware — the last one deciding what the rest of an automation may assume,
+    since interface names and available methods differ between lines.
+
+    Without a session the box answers a subset, so :func:`liveboxapi.identify`
+    fills ``mac``, ``product_class`` and ``firmware`` only; ``model_name`` and
+    ``hardware`` stay empty unless this is built from an authenticated
+    ``DeviceInfo.get``, which returns the full record. Measured on a Livebox W7
+    running ``SGW7-fr-G03.R09.C02_02``: the anonymous answer carries the base
+    MAC, the product class, the software versions and the serial number.
+    """
+
+    mac: str
+    product_class: str
+    firmware: str
+    model_name: str = ""
+    hardware: str = ""
+
+    @classmethod
+    def from_api(cls, payload: dict) -> "BoxIdentity":
+        return cls(
+            mac=(payload.get("BaseMAC") or "").upper(),
+            product_class=payload.get("ProductClass") or "",
+            model_name=payload.get("ModelName") or "",
+            firmware=payload.get("SoftwareVersion") or "",
+            hardware=payload.get("HardwareVersion") or "",
+        )
 
 
 @dataclass(frozen=True, slots=True)

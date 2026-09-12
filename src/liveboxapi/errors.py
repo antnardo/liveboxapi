@@ -13,6 +13,7 @@ __all__ = [
     "ERROR_PERMISSION_DENIED",
     "AuthenticationError",
     "LiveboxError",
+    "MalformedResponseError",
     "ReadOnlyError",
 ]
 
@@ -60,6 +61,34 @@ class AuthenticationError(LiveboxError):
         self.info = ""
         self.service = "sah.Device.Information"
         self.method = "createContext"
+
+
+class MalformedResponseError(LiveboxError):
+    """The body was not JSON, and the known repairs did not make it JSON either.
+
+    Subclasses :class:`LiveboxError` so that a single ``except`` clause covers
+    every way a call can fail: a refusal the box words properly, and a refusal it
+    words badly. Letting ``json.JSONDecodeError`` escape instead — which this
+    package did until 0.1.1 — forces callers to catch an exception from the
+    standard library to survive a firmware quirk.
+
+    ``info`` holds the beginning of the offending body, because a malformed
+    response is undiagnosable without seeing it. It is truncated: bodies reach
+    hundreds of kilobytes, and a full one could carry a Wi-Fi key into a log.
+    """
+
+    EXCERPT_LENGTH = 200
+
+    def __init__(self, body: str) -> None:
+        excerpt = body[: self.EXCERPT_LENGTH]
+        if len(body) > self.EXCERPT_LENGTH:
+            excerpt += "…"
+        Exception.__init__(self, f"the box sent a body that is not JSON: {excerpt!r}")
+        self.code = 0
+        self.description = "malformed response body"
+        self.info = excerpt
+        self.service = ""
+        self.method = ""
 
 
 class ReadOnlyError(RuntimeError):

@@ -10,10 +10,61 @@ back, which is why this package can start it but not inspect it.
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from liveboxapi.models import UserAccount
-from liveboxapi.session import LiveboxSession
+import requests
 
-__all__ = ["SystemApi"]
+from liveboxapi.credentials import DEFAULT_URL
+from liveboxapi.errors import MalformedResponseError
+from liveboxapi.models import BoxIdentity, UserAccount
+from liveboxapi.session import LiveboxSession
+from liveboxapi.transport import BodyDecoder
+
+__all__ = ["SystemApi", "identify"]
+
+
+def identify(
+    url: str = DEFAULT_URL,
+    *,
+    timeout: float | tuple[float, float] = 5.0,
+    verify: bool | str = True,
+) -> BoxIdentity | None:
+    """Ask an address what it is, without credentials.
+
+    ``DeviceInfo.get`` answers an unauthenticated caller, which makes this
+    the way to check that a Livebox is reachable — and which model and
+    firmware — before a password is fetched from a password manager, or
+    before deciding which of two code paths an automation should take.
+
+    The anonymous answer is a subset: model name and hardware version need a
+    session, so :attr:`BoxIdentity.model_name` and
+    :attr:`BoxIdentity.hardware` come back empty here. Use
+    :meth:`SystemApi.device_info` once logged in for the full record.
+
+    Returns ``None`` when nothing Livebox-shaped answers: unreachable host,
+    a web server that is not a box, a body that is not JSON. A probe that
+    raised on every one of those would need a ``try`` around each use, so
+    this one reserves exceptions for callers who asked a real question.
+    """
+    if not url.endswith("/"):
+        url = url.rstrip("/") + "/"
+    try:
+        response = requests.post(
+            url + "ws",
+            headers={
+                "Accept": "*/*",
+                "Content-Type": "application/x-sah-ws-4-call+json",
+            },
+            json={"service": "sysbus.DeviceInfo", "method": "get", "parameters": {}},
+            timeout=timeout,
+            verify=verify,
+        )
+        response.raise_for_status()
+        payload = BodyDecoder().decode(response)
+    except (requests.RequestException, MalformedResponseError):
+        return None
+    status = payload.get("status") if isinstance(payload, dict) else None
+    if not isinstance(status, dict) or not status.get("BaseMAC"):
+        return None
+    return BoxIdentity.from_api(status)
 
 
 class SystemApi:

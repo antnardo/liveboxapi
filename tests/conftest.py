@@ -15,12 +15,24 @@ from liveboxapi.session import LiveboxSession
 
 
 class FakeResponse:
-    def __init__(self, payload: dict, status_code: int = 200) -> None:
+    """A response the decoder can read: bytes, not a parsed object.
+
+    ``body`` bypasses serialisation so a test can hand over exactly what the
+    firmware sends, malformations included.
+    """
+
+    def __init__(
+        self,
+        payload: dict | list | None = None,
+        status_code: int = 200,
+        body: str | None = None,
+    ) -> None:
         self._payload = payload
         self.status_code = status_code
-        self.text = json.dumps(payload)
+        self.text = body if body is not None else json.dumps(payload)
+        self.content = self.text.encode("utf-8")
 
-    def json(self) -> dict:
+    def json(self) -> dict | list | None:
         return self._payload
 
     def raise_for_status(self) -> None:
@@ -42,15 +54,19 @@ class FakeHTTP:
         self.gets: list[dict] = []
         self.closed = False
 
-    def enqueue(self, payload: dict, status_code: int = 200) -> None:
+    def enqueue(self, payload: dict | list, status_code: int = 200) -> None:
         self.queue.append(FakeResponse(payload, status_code))
 
-    def post(self, url, headers=None, json=None, timeout=None):
-        self.posts.append({"url": url, "headers": headers or {}, "body": json or {}})
+    def enqueue_body(self, body: str, status_code: int = 200) -> None:
+        """Queue a raw body, for the malformed answers this firmware sends."""
+        self.queue.append(FakeResponse(body=body, status_code=status_code))
+
+    def post(self, url, headers=None, json=None, timeout=None, verify=None):
+        self.posts.append({"url": url, "headers": headers or {}, "body": json or {}, "verify": verify})
         return self.queue.pop(0) if self.queue else FakeResponse(self.default)
 
-    def get(self, url, params=None, headers=None, timeout=None):
-        self.gets.append({"url": url, "params": params or {}, "headers": headers or {}})
+    def get(self, url, params=None, headers=None, timeout=None, verify=None):
+        self.gets.append({"url": url, "params": params or {}, "headers": headers or {}, "verify": verify})
         return self.queue.pop(0) if self.queue else FakeResponse(self.default)
 
     def close(self) -> None:

@@ -82,6 +82,21 @@ session, and only the subcommands that name a change can write.
 
 Anything not wrapped is one call away: `box.call(service, method, params)`.
 
+No session needed to ask an address what it is — `DeviceInfo.get` is the one
+service the box serves anonymously:
+
+```python
+from liveboxapi import identify
+
+found = identify("http://192.168.1.1/")
+if found:
+    print(found.product_class, found.firmware)   # Livebox W7  SGW7-fr-G03.R09
+```
+
+Useful before fetching a password, and to branch on firmware: interface names
+and available methods differ between lines. The anonymous answer is a subset —
+model name and hardware version need a session.
+
 ## Two things this does differently
 
 **Batch.** Opening a session costs a round trip and a password check. Twenty
@@ -109,10 +124,16 @@ deleteDMZ(string id)
 commit()
 ```
 
-Existing tooling believes the operator disabled this from the Wi-Fi 7 model
-onwards, and gates it on the model number without retesting. On a Livebox W7
-running `SGW7-fr-G03.R09`, the same REST route answers normally, full subtree
-included. If it fails on yours, please open an issue with your firmware string.
+Existing tooling long believed the operator had disabled this from the Wi-Fi 7
+model onwards. It had not: on a Livebox W7 running `SGW7-fr-G03.R09.C02_02`,
+every *named* object answers normally over the REST route, full subtree
+included. Only the two *global* requests — `sysbus/.` and `sysbus/*`, the whole
+tree at once — return HTTP 400, which is what earlier tests hit. Confirmed with
+the LiveboxMonitor maintainer, who now probes the reply instead of gating on the
+model number ([issue #120](https://github.com/p-dor/LiveboxMonitor/issues/120));
+the W7 datamodel dump produced with this client is published in that project.
+If introspection fails on yours, please open an issue with your firmware
+string.
 
 ## Alternatives, honestly
 

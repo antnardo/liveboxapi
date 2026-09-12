@@ -27,9 +27,15 @@ is the only reliable documentation.
 
 from liveboxapi.credentials import Credentials, resolve_credentials
 from liveboxapi.dhcp import DhcpApi
-from liveboxapi.errors import AuthenticationError, LiveboxError, ReadOnlyError
+from liveboxapi.errors import (
+    AuthenticationError,
+    LiveboxError,
+    MalformedResponseError,
+    ReadOnlyError,
+)
 from liveboxapi.firewall import FirewallApi
 from liveboxapi.models import (
+    BoxIdentity,
     Device,
     DmzEntry,
     FunctionSignature,
@@ -46,15 +52,18 @@ from liveboxapi.models import (
 from liveboxapi.network import NetworkApi
 from liveboxapi.schedule import ScheduleApi
 from liveboxapi.session import BatchCall, LiveboxSession
-from liveboxapi.system import SystemApi
+from liveboxapi.system import SystemApi, identify
+from liveboxapi.transport import BodyDecoder
 from liveboxapi.voice import VoiceApi
 from liveboxapi.wifi import WifiApi
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "AuthenticationError",
     "BatchCall",
+    "BodyDecoder",
+    "BoxIdentity",
     "Credentials",
     "Device",
     "DhcpApi",
@@ -66,6 +75,7 @@ __all__ = [
     "Livebox",
     "LiveboxError",
     "LiveboxSession",
+    "MalformedResponseError",
     "MissedCall",
     "NetworkApi",
     "PortForward",
@@ -80,6 +90,7 @@ __all__ = [
     "WifiApi",
     "WifiInterface",
     "__version__",
+    "identify",
     "resolve_credentials",
 ]
 
@@ -104,6 +115,7 @@ class Livebox:
         timeout: float | tuple[float, float] = (5.0, 15.0),
         wan_interface: str = "veip0",
         session: LiveboxSession | None = None,
+        verify: bool | str = True,
     ) -> None:
         # An existing session can be passed in to share one login between
         # several facades, or to hand the tests a recorded transport.
@@ -111,6 +123,7 @@ class Livebox:
             credentials or resolve_credentials(url, user, password),
             readonly=readonly,
             timeout=timeout,
+            verify=verify,
         )
         self.system = SystemApi(self.session)
         self.network = NetworkApi(self.session, wan_interface=wan_interface)

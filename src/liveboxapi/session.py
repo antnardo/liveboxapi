@@ -23,6 +23,7 @@ import requests
 from liveboxapi.credentials import Credentials, resolve_credentials
 from liveboxapi.errors import AuthenticationError, LiveboxError, ReadOnlyError
 from liveboxapi.models import FunctionSignature
+from liveboxapi.transport import BodyDecoder
 
 __all__ = ["APP_NAME", "BatchCall", "LiveboxSession"]
 
@@ -71,12 +72,24 @@ class LiveboxSession:
         readonly: bool = False,
         timeout: float | tuple[float, float] = (5.0, 15.0),
         session: requests.Session | None = None,
+        verify: bool | str = True,
     ) -> None:
         self.credentials = credentials or resolve_credentials()
         self.readonly = readonly
         self.timeout = timeout
+        self.verify = verify
+        """Whether to check the TLS certificate, or the path to a CA bundle.
+
+        Only relevant over ``https``, which the box also serves — with a
+        certificate no public authority signed, so verification fails there by
+        design. Pass ``verify=False`` for that case, deliberately: on a link to
+        a device on the local network the guarantee lost is small, but silently
+        disabling the check for every URL — as clients talking to this box tend
+        to do — also disables it the day one is pointed at a remote host.
+        """
         self._http = session or requests.Session()
         self._context_id: str | None = None
+        self._decoder = BodyDecoder()
 
     # ------------------------------------------------------------------ session
 
@@ -104,9 +117,10 @@ class LiveboxSession:
                 },
             },
             timeout=self.timeout,
+            verify=self.verify,
         )
         response.raise_for_status()
-        context = (response.json().get("data") or {}).get("contextID")
+        context = (self._decoder.decode(response).get("data") or {}).get("contextID")
         if not context:
             raise AuthenticationError(
                 f"the box refused the credentials for user {self.credentials.user!r} "
@@ -158,12 +172,13 @@ class LiveboxSession:
             headers=self._headers(),
             json={"service": service, "method": method, "parameters": dict(parameters or {})},
             timeout=self.timeout,
+            verify=self.verify,
         )
         if response.status_code in (401, 403) and _retry:
             self._context_id = None
             return self.raw(service, method, parameters, _retry=False)
         response.raise_for_status()
-        return response.json()
+        return self._decoder.decode(response)
 
     def call(
         self,
@@ -213,23 +228,55 @@ class LiveboxSession:
         if self.readonly and method.startswith(_WRITE_PREFIXES):
             raise ReadOnlyError(service, method)
 
-    @staticmethod
-    def _raise_on_error(payload: Mapping[str, Any], service: str, method: str) -> None:
-        errors = [e for e in payload.get("errors") or [] if e.get("error")]
-        if not errors:
+    @classmethod
+    def _raise_on_error(cls, payload: Any, service: str, method: str) -> None:
+        """Raise if the payload carries a refusal, in either of its two shapes.
+
+        The box words the same failure two ways depending on the service: a list
+        under ``errors``, or a bare ``error`` code with ``description`` and
+        ``info`` as siblings at the top level. Reading only the list — which this
+        package did until 0.1.1 — means a whole family of refusals is returned as
+        if the call had worked.
+        """
+        if not isinstance(payload, Mapping):
+            # A repaired body can be a list of objects, and a list carries no
+            # error envelope, so there is nothing to check.
             return
-        first = errors[0]
+        error = cls._first_error(payload)
+        if error is None:
+            return
+        code, description, info = error
         raise LiveboxError(
-            code=int(first.get("error", 0)),
-            description=first.get("description", ""),
-            info=first.get("info", ""),
+            code=code,
+            description=description,
+            info=info,
             service=service,
             method=method,
         )
 
+    @staticmethod
+    def _first_error(payload: Mapping[str, Any]) -> tuple[int, str, str] | None:
+        errors = payload.get("errors")
+        if isinstance(errors, list):
+            for entry in errors:
+                if isinstance(entry, Mapping) and entry.get("error"):
+                    return (
+                        int(entry.get("error", 0)),
+                        str(entry.get("description", "")),
+                        str(entry.get("info", "")),
+                    )
+        code = payload.get("error")
+        if isinstance(code, int) and code:
+            return (
+                code,
+                str(payload.get("description", "")),
+                str(payload.get("info", "")),
+            )
+        return None
+
     # ------------------------------------------------------------ introspection
 
-    def introspect(self, path: str, depth: int = 1) -> dict:
+    def introspect(self, path: str, depth: int = 1) -> Any:
         """Read an object's own description: its parameters and its methods.
 
         ``path`` accepts either spelling — ``NMC.Wifi`` or ``NMC/Wifi`` — and is
@@ -238,6 +285,12 @@ class LiveboxSession:
 
         ``depth`` is the datamodel depth: 1 for the object itself, -1 for the
         whole subtree, which can be hundreds of kilobytes.
+
+        Returns the object's description, or a list of them. Every object read
+        on a Livebox W7 answers with a single mapping, but a body carrying two
+        concatenated objects — a malformation this firmware is known for, see
+        :mod:`liveboxapi.transport` — is repaired into an array, so callers that
+        walk the result must accept both shapes.
         """
         endpoint = self.credentials.url + "sysbus/" + path.replace(".", "/").strip("/")
         if self._context_id is None:
@@ -251,9 +304,10 @@ class LiveboxSession:
                 "X-Context": self._context_id or "",
             },
             timeout=self.timeout,
+            verify=self.verify,
         )
         response.raise_for_status()
-        payload = response.json()
+        payload = self._decoder.decode(response)
         self._raise_on_error(payload, path, "introspect")
         return payload
 
@@ -263,14 +317,29 @@ class LiveboxSession:
         This is the answer to "can I automate this setting?", read from the
         device rather than from documentation written for another model.
         """
-        described = self.introspect(path).get("functions") or []
+        described = self._described(path, "functions")
         signatures = [FunctionSignature.from_api(f) for f in described]
         return [s for s in signatures if s.writes] if writes_only else signatures
 
     def parameters(self, path: str) -> dict[str, Any]:
         """An object's parameters and their current values."""
-        described = self.introspect(path).get("parameters") or []
-        return {p.get("name"): p.get("value") for p in described if p.get("name")}
+        described = self._described(path, "parameters")
+        return {str(p["name"]): p.get("value") for p in described if p.get("name")}
+
+    def _described(self, path: str, key: str) -> list[dict[str, Any]]:
+        """``functions`` or ``parameters`` of an object, whatever shape it came in.
+
+        Flattens the array form so that asking an object what it can do does not
+        depend on whether its service happens to declare one root object or
+        several.
+        """
+        payload = self.introspect(path)
+        entries = payload if isinstance(payload, list) else [payload]
+        described: list[dict[str, Any]] = []
+        for entry in entries:
+            if isinstance(entry, Mapping):
+                described.extend(entry.get(key) or [])
+        return described
 
     def __repr__(self) -> str:
         state = "logged in" if self.logged_in else "not logged in"

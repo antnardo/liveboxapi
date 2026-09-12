@@ -3,8 +3,11 @@
 from datetime import timedelta
 
 import pytest
+import requests
 
-from liveboxapi.system import SystemApi
+from conftest import FakeResponse
+from liveboxapi import system as system_module
+from liveboxapi.system import SystemApi, identify
 
 
 @pytest.fixture
@@ -72,3 +75,52 @@ class TestBackup:
         http.enqueue({"status": True})
         system.launch_restore()
         assert http.calls[-1] == ("NMC.NetworkConfig", "launchNetworkRestore")
+
+
+class TestIdentify:
+    """``DeviceInfo.get`` is the one service an anonymous caller may read."""
+
+    @staticmethod
+    def _answer(monkeypatch, payload=None, body=None, raising=None):
+        captured: dict = {}
+
+        def fake_post(url, headers=None, json=None, timeout=None, verify=None):
+            captured["url"] = url
+            captured["headers"] = headers or {}
+            captured["body"] = json or {}
+            if raising is not None:
+                raise raising
+            return FakeResponse(payload, body=body)
+
+        monkeypatch.setattr(system_module.requests, "post", fake_post)
+        return captured
+
+    def test_the_identity_is_parsed(self, monkeypatch):
+        self._answer(
+            monkeypatch,
+            {"status": {"BaseMAC": "58:1d:d8:ac:4a:c0", "ProductClass": "Livebox W7"}},
+        )
+        found = identify("http://box.test")
+        assert (found.mac, found.product_class) == ("58:1D:D8:AC:4A:C0", "Livebox W7")
+
+    def test_no_authorization_header_is_sent(self, monkeypatch):
+        captured = self._answer(monkeypatch, {"status": {"BaseMAC": "AA:BB:CC:DD:EE:FF"}})
+        identify("http://box.test")
+        assert "Authorization" not in captured["headers"]
+
+    def test_a_missing_trailing_slash_is_added(self, monkeypatch):
+        captured = self._answer(monkeypatch, {"status": {"BaseMAC": "AA:BB:CC:DD:EE:FF"}})
+        identify("http://box.test")
+        assert captured["url"] == "http://box.test/ws"
+
+    def test_something_that_is_not_a_box_gives_none(self, monkeypatch):
+        self._answer(monkeypatch, body="<html>hello</html>")
+        assert identify("http://box.test") is None
+
+    def test_an_answer_without_a_mac_gives_none(self, monkeypatch):
+        self._answer(monkeypatch, {"status": {"Manufacturer": "Someone"}})
+        assert identify("http://box.test") is None
+
+    def test_an_unreachable_host_gives_none(self, monkeypatch):
+        self._answer(monkeypatch, raising=requests.ConnectionError("no route"))
+        assert identify("http://box.test") is None
